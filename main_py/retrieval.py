@@ -313,6 +313,80 @@ class BidMateRetriever:
         }
 
 
+
+import subprocess as _subprocess
+import os
+
+HWP_DIR = "/mnt/gukrul/dataset/original_data_list/files_advanced"
+
+
+def _extract_hwp_text(original_name: str) -> str:
+    hwp_path = os.path.join(HWP_DIR, original_name)
+    if not os.path.exists(hwp_path):
+        return ""
+    try:
+        result = _subprocess.run(
+            ["hwp5txt", hwp_path],
+            capture_output=True, text=True, timeout=30
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _clean_hwp_text(text: str) -> str:
+    import re
+    text = re.sub("<.+?>", "", text)
+    text = re.sub("\n{3,}", "\n\n", text)
+    text = re.sub(" {2,}", " ", text)
+    return text.strip()
+def _split_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list:
+    text = _clean_hwp_text(text)
+    paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 50]
+    chunks, current = [], ""
+    for para in paragraphs:
+        if len(current) + len(para) <= chunk_size:
+            current += "\n\n" + para if current else para
+        else:
+            if current:
+                chunks.append(current)
+            current = para
+    if current:
+        chunks.append(current)
+    return [c for c in chunks if len(c.strip()) > 50]
+def _select_relevant_sections(query: str, text: str, embed_model, top_n: int = 3) -> str:
+    if not text:
+        return ""
+    sections = _split_text(text)
+    if not sections:
+        return ""
+    try:
+        q_emb  = embed_model.encode([query], normalize_embeddings=True)[0]
+        s_embs = embed_model.encode(sections, normalize_embeddings=True, batch_size=32)
+        scores = np.dot(s_embs, q_emb)
+        top_idx = sorted(np.argsort(scores)[::-1][:top_n])
+        return "\n\n".join([sections[i] for i in top_idx])
+    except Exception:
+        return text[:2000]
+
+
+def _get_hwp_context(query: str, top_chunks: list, embed_model, top_docs: int = 2) -> str:
+    seen, contexts = set(), []
+    for chunk in top_chunks[:top_docs]:
+        original_name = chunk.get("metadata", {}).get("original_name", "")
+        if not original_name or original_name in seen:
+            continue
+        seen.add(original_name)
+        full_text = _extract_hwp_text(original_name)
+        if not full_text:
+            continue
+        selected = _select_relevant_sections(query, full_text, embed_model)
+        if selected:
+            agency  = chunk.get("metadata", {}).get("agency", "")
+            project = chunk.get("metadata", {}).get("project_name", "")
+            contexts.append(f"[{agency} - {project}]\n{selected}")
+    return "\n\n---\n\n".join(contexts)
+
 def get_context(query: str, history=None, meta_filter=None) -> dict:
     effective_query = query
     if history:
@@ -320,8 +394,11 @@ def get_context(query: str, history=None, meta_filter=None) -> dict:
         if prev_user:
             effective_query = f"{prev_user[-1]} {query}"
     result = retriever.retrieve(effective_query, meta_filter=meta_filter)
+
+    context = result["context"]
+
     return {
-        "context"    : result["context"],
+        "context"    : context,
         "sources"    : [{"rank": c["rank"], "agency": c["metadata"].get("agency",""),
                          "year": c["metadata"].get("year",""),
                          "project": c["metadata"].get("project_name",""),

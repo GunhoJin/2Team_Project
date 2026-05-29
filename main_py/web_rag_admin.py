@@ -4,16 +4,14 @@ import json
 import uuid
 import logging
 import datetime
-import numpy as np
 import streamlit as st
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import LOG_PATH, EMBED_MODEL_ID
-from service import GenerationService
+from config import LOG_PATH
+from api_client import stream_chat, compute_metrics, is_server_ready
 
-# 로그 설정
 logging.basicConfig(
     filename=str(LOG_PATH),
     level=logging.INFO,
@@ -22,14 +20,10 @@ logging.basicConfig(
     encoding="utf-8",
 )
 
-# 세션 저장 경로
 SESSION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sessions")
 os.makedirs(SESSION_DIR, exist_ok=True)
 
-OPENAI_EVAL_ENABLED = False  # OpenAI 키 입력 시 True로 스위칭
 
-
-# 세션 파일 관리
 def list_sessions():
     files = sorted(
         [f for f in os.listdir(SESSION_DIR) if f.endswith(".json")],
@@ -74,58 +68,11 @@ def delete_session(session_id):
         os.remove(path)
 
 
-# 평가 지표 계산 (임베딩 기반)
-@st.cache_resource
-def get_eval_embed_model():
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(
-        EMBED_MODEL_ID,
-        cache_folder="/mnt/gukrul/hf_cache/hub",
-    )
-
-
-def cosine_sim(a, b):
-    a, b = np.array(a), np.array(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
-
-
-def compute_metrics(question, answer, context, sources, openai_key=None):
-    if openai_key:
-        return compute_metrics_llm(question, answer, context, openai_key)
-    return compute_metrics_embedding(question, answer, context, sources)
-
-
-def compute_metrics_embedding(question, answer, context, sources):
-    try:
-        model = get_eval_embed_model()
-        q_emb  = model.encode([question], normalize_embeddings=True)[0]
-        a_emb  = model.encode([answer],   normalize_embeddings=True)[0]
-        c_emb  = model.encode([context],  normalize_embeddings=True)[0]
-
-        faithfulness     = round(cosine_sim(a_emb, c_emb), 3)
-        answer_relevancy = round(cosine_sim(a_emb, q_emb), 3)
-        context_recall   = round(cosine_sim(c_emb, q_emb), 3)
-
-        # Context Precision: Reranker 점수 상위 비율
-        scores = [s.get("score", 0) for s in sources]
-        context_precision = round(float(np.mean(scores)) if scores else 0.0, 3)
-
-        return {
-            "Faithfulness"     : faithfulness,
-            "Answer Relevancy" : answer_relevancy,
-            "Context Precision": context_precision,
-            "Context Recall"   : context_recall,
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 def compute_metrics_llm(question, answer, context, openai_key):
     try:
         from openai import OpenAI
         client = OpenAI(api_key=openai_key)
-
-        prompt = f"""다음 RAG 시스템의 출력을 평가하세요. 각 지표를 0.0~1.0 사이 점수로 평가하고 JSON으로만 응답하세요.
+        prompt = f"""다음 RAG 시스템의 출력을 평가하세요. 각 지표를 0.0~1.0 점수로 평가하고 JSON으로만 응답하세요.
 
 질문: {question}
 답변: {answer[:500]}
@@ -144,14 +91,12 @@ JSON 형식:
         return {"error": str(e)}
 
 
-# Streamlit 설정
 st.set_page_config(
     page_title="국룰:RFP 맥잡기",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# CSS - 짙은 파란색 테마
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap');
@@ -167,9 +112,6 @@ st.markdown("""
     --text-primary : #e2e8f0;
     --text-muted   : #94a3b8;
     --border       : #1e3a5f;
-    --success      : #10b981;
-    --warning      : #f59e0b;
-    --danger       : #ef4444;
 }
 
 html, body, .stApp {
@@ -178,22 +120,17 @@ html, body, .stApp {
     font-family: 'Noto Sans KR', sans-serif !important;
 }
 
-/* 사이드바 */
 section[data-testid="stSidebar"] {
     background-color: var(--bg-secondary) !important;
     border-right: 1px solid var(--border) !important;
 }
-section[data-testid="stSidebar"] * {
-    color: var(--text-primary) !important;
-}
+section[data-testid="stSidebar"] * { color: var(--text-primary) !important; }
 
-/* 타이틀 */
 .main-title {
     font-family: 'Space Mono', monospace;
     font-size: 1.8rem;
     font-weight: 700;
-    color: #cbd5e1;  
-    letter-spacing: -0.5px;
+    color: #cbd5e1;
     border-bottom: 2px solid var(--accent);
     padding-bottom: 0.5rem;
     margin-bottom: 1rem;
@@ -206,35 +143,6 @@ section[data-testid="stSidebar"] * {
     font-family: 'Space Mono', monospace;
 }
 
-/* 세션 아이템 */
-.session-item {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 6px;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-.session-item:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent);
-}
-.session-title {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.session-date {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-    margin-top: 2px;
-}
-
-/* 메트릭 카드 */
 .metric-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -262,7 +170,6 @@ section[data-testid="stSidebar"] * {
 .metric-value {
     font-size: 1.4rem;
     font-weight: 700;
-    color: var(--text-primary);
     font-family: 'Space Mono', monospace;
 }
 .metric-bar {
@@ -278,14 +185,12 @@ section[data-testid="stSidebar"] * {
     transition: width 0.6s ease;
 }
 
-/* 채팅 */
 .stChatMessage {
     background: var(--bg-card) !important;
     border: 1px solid var(--border) !important;
     border-radius: 12px !important;
 }
 
-/* 버튼 */
 .stButton > button {
     background: var(--accent) !important;
     color: white !important;
@@ -299,7 +204,6 @@ section[data-testid="stSidebar"] * {
     box-shadow: 0 0 12px rgba(37, 99, 235, 0.4) !important;
 }
 
-/* 입력창 */
 .stChatInputContainer, .stTextInput input {
     background: var(--bg-card) !important;
     border-color: var(--border) !important;
@@ -318,7 +222,6 @@ section[data-testid="stSidebar"] * {
     outline-color: white !important;
 }
 
-/* 탭 */
 .stTabs [data-baseweb="tab-list"] {
     background: var(--bg-secondary) !important;
     border-bottom: 1px solid var(--border) !important;
@@ -332,12 +235,8 @@ section[data-testid="stSidebar"] * {
     border-bottom: 2px solid var(--accent-light) !important;
 }
 
-/* 구분선 */
-hr {
-    border-color: var(--border) !important;
-}
+hr { border-color: var(--border) !important; }
 
-/* 섹션 헤더 */
 .section-header {
     font-size: 0.7rem;
     text-transform: uppercase;
@@ -349,46 +248,50 @@ hr {
     margin-bottom: 10px;
 }
 
-/* expander */
-.streamlit-expanderHeader {
-    background: var(--bg-card) !important;
-    color: var(--text-primary) !important;
+div[data-baseweb="base-input"]:focus-within {
+    border-color: white !important;
+    outline: none !important;
+    box-shadow: 0 0 0 2px white !important;
+}
+div[data-baseweb="textarea"]:focus-within {
+    border-color: white !important;
+    outline: none !important;
+    box-shadow: 0 0 0 2px white !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
+defaults = {
+    "messages"     : [],
+    "last_meta"    : {},
+    "last_sources" : [],
+    "last_metrics" : {},
+    "last_context" : "",
+    "last_question": "",
+    "last_answer"  : "",
+    "session_id"   : str(uuid.uuid4()),
+    "openai_key"   : "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# Session State 초기화
-if "messages"      not in st.session_state: st.session_state.messages      = []
-if "last_meta"     not in st.session_state: st.session_state.last_meta     = {}
-if "last_sources"  not in st.session_state: st.session_state.last_sources  = []
-if "last_metrics"  not in st.session_state: st.session_state.last_metrics  = {}
-if "last_context"  not in st.session_state: st.session_state.last_context  = ""
-if "last_question" not in st.session_state: st.session_state.last_question = ""
-if "last_answer"   not in st.session_state: st.session_state.last_answer   = ""
-if "session_id"    not in st.session_state: st.session_state.session_id    = str(uuid.uuid4())
-if "openai_key"    not in st.session_state: st.session_state.openai_key    = ""
+if not is_server_ready():
+    st.error("API 서버(포트 2026)가 준비되지 않았습니다. fastapi_server.py를 먼저 실행해주세요.")
+    st.stop()
 
-
-# 왼쪽 사이드바 - 세션 목록
 with st.sidebar:
     st.markdown('<div class="main-title">국룰:RFP 맥잡기</div>', unsafe_allow_html=True)
 
     if st.button("+ 새 대화", use_container_width=True):
         if st.session_state.messages:
             save_session(st.session_state.session_id, st.session_state.messages)
-        st.session_state.messages      = []
-        st.session_state.last_meta     = {}
-        st.session_state.last_sources  = []
-        st.session_state.last_metrics  = {}
-        st.session_state.last_context  = ""
-        st.session_state.last_question = ""
-        st.session_state.last_answer   = ""
-        st.session_state.session_id    = str(uuid.uuid4())
+        for k, v in defaults.items():
+            st.session_state[k] = v
+        st.session_state.session_id = str(uuid.uuid4())
         st.rerun()
 
     st.markdown('<div class="section-header">대화 기록</div>', unsafe_allow_html=True)
-
     sessions = list_sessions()
     if sessions:
         for s in sessions[:20]:
@@ -427,30 +330,13 @@ with st.sidebar:
         st.markdown('<p style="color:var(--text-muted);font-size:0.75rem;">임베딩 기반 평가 사용 중</p>', unsafe_allow_html=True)
 
 
-# 서비스 초기화
-@st.cache_resource
-def load_service():
-    return GenerationService()
-
-try:
-    with st.spinner("파이프라인 로딩 중..."):
-        svc = load_service()
-except Exception as e:
-    st.error(f"초기화 오류: {e}")
-    st.stop()
-
-
-# 메인 타이틀
 st.markdown('<div class="main-title">국룰:RFP 맥잡기</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-caption">Gemma4 E4B · LoRA · ChromaDB · BM25 · KURE-v1</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-caption">Phi-4-mini · LoRA · ChromaDB · BM25 · KURE-v1</div>', unsafe_allow_html=True)
 
-# 메인 레이아웃: 채팅(좌) + 평가 지표(우)
 chat_col, metric_col = st.columns([3, 1])
 
-# 오른쪽 - 평가 지표 패널
 with metric_col:
     st.markdown('<div class="section-header">답변 품질 평가</div>', unsafe_allow_html=True)
-
     metrics = st.session_state.last_metrics
 
     def metric_color(val):
@@ -491,7 +377,6 @@ with metric_col:
             st.markdown(f'<p style="font-size:0.75rem;color:var(--text-muted)">서브쿼리: {sub_q}</p>', unsafe_allow_html=True)
 
 
-# 왼쪽 - 채팅
 with chat_col:
     tab1, tab2, tab3 = st.tabs(["Chat", "Retrieved Docs", "Analytics"])
 
@@ -500,13 +385,17 @@ with chat_col:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        if prompt := st.chat_input("RFP에 대해 질문하세요"):
-            logging.info(f"[USER QUESTION]: {prompt}")
+        if prompt := st.chat_input("질문하세요"):
+            logging.info(f"[ADMIN][USER]: {prompt}")
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            history = GenerationService.format_history(st.session_state.messages[:-1])
+            history = [
+                {"role": m["role"], "content": m["content"]}
+                for m in st.session_state.messages[:-1]
+                if m["role"] in ("user", "assistant")
+            ]
 
             with st.chat_message("assistant"):
                 try:
@@ -515,18 +404,25 @@ with chat_col:
                     meta_info     = {}
                     context_text  = ""
 
+                    step_icons = {1: "1. 쿼리 재작성", 2: "2. 문서 검색", 3: "3. Reranker", 4: "4. 답변 생성"}
                     with st.status("RAG 처리 중...", expanded=True) as status:
-                        for chunk in svc.stream(prompt, history=history if history else None):
-                            if chunk["type"] == "meta":
-                                data = chunk["data"]
-                                meta_info    = data
-                                context_text = data.get("context", "")
-                                st.write(f"검색 완료 - 필터: {data['filter']} | 재작성: {data['rewritten_query']}")
+                        current_step = 0
+                        for chunk in stream_chat(prompt, history=history if history else None):
+                            if chunk["type"] == "progress":
+                                step    = chunk["data"]["step"]
+                                message = chunk["data"]["message"]
+                                if step != current_step:
+                                    current_step = step
+                                    st.write(f"**{step_icons.get(step, str(step))}**")
+                                st.caption(message)
+                            elif chunk["type"] == "meta":
+                                meta_info    = chunk["data"]
+                                context_text = chunk["data"].get("context", "")
                             elif chunk["type"] == "chunk":
                                 answer_chunks.append(chunk["data"])
                             elif chunk["type"] == "done":
                                 sources_text = chunk["data"]["sources_text"]
-                        status.update(label="완료", state="complete")
+                        status.update(label="처리 완료", state="complete")
 
                     answer_full = "".join(answer_chunks)
                     if sources_text and "[출처]" not in answer_full:
@@ -541,25 +437,28 @@ with chat_col:
                     st.session_state.last_question = prompt
                     st.session_state.last_answer   = answer_full
 
-                    # 평가 지표 계산
+                    # 평가 지표 - API 서버에서 계산
                     if context_text:
-                        metrics = compute_metrics(
-                            question  = prompt,
-                            answer    = answer_full,
-                            context   = context_text,
-                            sources   = meta_info.get("sources", []),
-                            openai_key= st.session_state.openai_key or None,
-                        )
+                        if st.session_state.openai_key:
+                            metrics = compute_metrics_llm(
+                                prompt, answer_full, context_text,
+                                st.session_state.openai_key
+                            )
+                        else:
+                            metrics = compute_metrics(
+                                question=prompt,
+                                answer  =answer_full,
+                                context =context_text,
+                                sources =meta_info.get("sources", []),
+                            )
                         st.session_state.last_metrics = metrics
 
-                    # 세션 자동 저장
                     save_session(st.session_state.session_id, st.session_state.messages)
-
-                    logging.info("[SYSTEM ANSWER]: RAG 답변 생성 완료")
+                    logging.info("[ADMIN][ANSWER]: 완료")
                     st.rerun()
 
                 except Exception as e:
-                    logging.error(f"[SYSTEM ERROR]: {e}")
+                    logging.error(f"[ADMIN][ERROR]: {e}")
                     st.error(f"RAG 처리 오류: {e}")
 
     with tab2:
