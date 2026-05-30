@@ -418,7 +418,7 @@ def init_retriever() -> BidMateRetriever:
     # 임베딩 모델
     embed_model = SentenceTransformer(
         EMBED_MODEL_ID,
-        device=DEVICE,
+        device="cpu",
         cache_folder="/mnt/gukrul/hf_cache/hub",
         local_files_only=True,
     )

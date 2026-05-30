@@ -12,9 +12,9 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # 경로
 PROJECT_ROOT = Path("/mnt/gukrul")
 DATASET_DIR  = PROJECT_ROOT / "dataset"
-CHUNKS_PATH  = DATASET_DIR / "chunks" / "chunks_all.json"
-CHROMA_PATH  = DATASET_DIR / "chroma_db"
-BM25_PATH    = DATASET_DIR / "bm25" / "bm25_index_bidmate_kure.pkl"
+CHUNKS_PATH  = DATASET_DIR / "chunks" / "kh_fixed_with_budget.json"
+CHROMA_PATH  = DATASET_DIR / "chroma_db_v2"
+BM25_PATH    = DATASET_DIR / "bm25" / "bm25_index_v2.pkl"
 EVAL_PATH    = DATASET_DIR / "eval"
 RESULT_DIR   = DATASET_DIR / "eval_results"
 ADAPTER_PATH = DATASET_DIR / "peft_output" / "phi4-mini" / "lora_adapter"
@@ -32,7 +32,7 @@ MAX_TOKENS_REWRITE  = 300
 MAX_TOKENS_GENERATE = 800
 
 # Retrieval 파라미터
-COLLECTION_NAME = "bidmate_chunks_all"
+COLLECTION_NAME = "bidmate_v2"
 DENSE_K         = 15
 SPARSE_K        = 15
 RRF_K           = 60

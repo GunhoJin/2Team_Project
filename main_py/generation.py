@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from peft import PeftModel
-from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, TextIteratorStreamer
 
 
 from config import (
@@ -19,14 +19,15 @@ logger = logging.getLogger(__name__)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # 프롬프트 템플릿
-BASE_SYSTEM_PROMPT = """당신은 공공 입찰 RFP(제안요청서) 전문 분석 어시스턴트 입찰메이트입니다.
+BASE_SYSTEM_PROMPT = """당신은 공공 입찰 RFP 문서 분석 어시스턴트입니다.
+아래 규칙을 반드시 지키세요.
 
-[핵심 원칙]
-1. 반드시 아래 [검색된 문서]의 내용만을 근거로 답변하세요.
-2. 문서에 없는 내용은 절대 추측하거나 생성하지 마세요.
-3. 금액, 날짜, 수량 등 수치는 원문 그대로 인용하세요.
-4. 답변 마지막에 반드시 [출처] 섹션을 포함하세요.
-5. 확인할 수 없는 내용은 "제공된 문서에서 확인할 수 없습니다"라고 명시하세요.
+규칙1: [검색된 문서]에 있는 내용만 답변하세요. 문서 외 지식 사용 금지.
+규칙2: 금액/날짜/기간 등 수치는 문서에 나온 숫자 그대로만 쓰세요. 계산하거나 변환하지 마세요.
+규칙3: 문서에 답이 없으면 반드시 "제공된 문서에서 확인할 수 없습니다"라고만 답하세요.
+규칙4: 문서에 없는 내용을 추측하거나 지어내는 것은 절대 금지입니다.
+규칙5: 답변은 간결하게 핵심만 작성하세요.
+"""
 """
 
 TYPE_INSTRUCTIONS = {
@@ -135,9 +136,10 @@ class _StreamContextManager:
 
     def __enter__(self):
         chat = _build_chat_input(self._system, self._messages)
+        actual_device = next(self._model.parameters()).device
         input_ids = self._tokenizer.apply_chat_template(
             chat, return_tensors="pt", add_generation_prompt=True
-        )["input_ids"].to(DEVICE)
+        )["input_ids"].to(actual_device)
         self._streamer = TextIteratorStreamer(
             self._tokenizer, skip_prompt=True, skip_special_tokens=True
         )
@@ -176,14 +178,20 @@ class _MessagesNamespace:
 
     def create(self, model, max_tokens, system, messages):
         chat = _build_chat_input(system, messages)
-        input_ids = self._tokenizer.apply_chat_template(
+        tokenized = self._tokenizer.apply_chat_template(
             chat, return_tensors="pt", add_generation_prompt=True
-        ).to(DEVICE)
+        )
+        actual_device = next(self._model.parameters()).device
+        if hasattr(tokenized, "input_ids"):
+            input_ids = tokenized.input_ids.to(actual_device)
+        else:
+            input_ids = tokenized.to(actual_device)
+        input_len = input_ids.shape[-1]
         with torch.inference_mode():
             output_ids = self._model.generate(
                 input_ids, max_new_tokens=max_tokens, do_sample=True, temperature=0.2, use_cache=True
             )
-        new_tokens = output_ids[0][input_ids.shape[-1]:]
+        new_tokens = output_ids[0][input_len:]
         text = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         return _MessagesResponse(text)
 
@@ -203,25 +211,18 @@ class BidMateGenerator:
         self._call_count = 0
 
     def _rewrite_query(self, query: str, history=None) -> str:
-        history_summary = ""
+        import re
+        rewritten = query
         if history:
-            prev_turns = []
-            for h in history[-4:]:
-                role = "사용자" if h["role"] == "user" else "어시스턴트"
-                prev_turns.append(f"{role}: {h['content'][:100]}")
-            history_summary = "\n[이전 대화]\n" + "\n".join(prev_turns) + "\n"
-        user_content = f"{history_summary}\n[재작성할 질문]\n{query}"
-        try:
-            response = self.client.messages.create(
-                model=LLM_MODEL, max_tokens=MAX_TOKENS_REWRITE,
-                system=REWRITE_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_content}]
-            )
-            return response.content[0].text.strip()
-        except Exception as e:
-            logger.warning(f"쿼리 재작성 실패 (원본 사용): {e}")
-            return query
-
+            for h in reversed(history[-6:]):
+                if h["role"] == "user":
+                    agency_pat = r"한국[가-힣]{1,6}공사|[가-힣]{2,8}공단|[가-힣]{2,8}은행|[가-힣]{2,8}공사|[가-힣]{2,8}연구원|[가-힣]{2,8}대학교|[가-힣]{2,8}의료원"
+                    prev_agency = re.findall(agency_pat, h["content"])
+                    curr_agency = re.findall(agency_pat, query)
+                    if prev_agency and not curr_agency:
+                        rewritten = prev_agency[0] + " " + query
+                    break
+        return rewritten
     def generate(self, query, history=None, meta_filter=None, verbose=False) -> dict:
         t_start = time.time()
         latency = {}
